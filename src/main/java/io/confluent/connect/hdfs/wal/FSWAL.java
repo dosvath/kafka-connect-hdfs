@@ -15,6 +15,7 @@
 
 package io.confluent.connect.hdfs.wal;
 
+import java.util.UUID;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.ipc.RemoteException;
 import org.apache.kafka.common.TopicPartition;
@@ -42,6 +43,7 @@ public class FSWAL implements WAL {
   private String logFile = null;
   private HdfsSinkConnectorConfig conf = null;
   private HdfsStorage storage = null;
+  private UUID logFileId;
 
   public FSWAL(String logsDir, TopicPartition topicPart, HdfsStorage storage)
       throws ConnectException {
@@ -49,6 +51,7 @@ public class FSWAL implements WAL {
     this.conf = storage.conf();
     String url = storage.url();
     logFile = FileUtils.logFileName(url, logsDir, topicPart);
+    logFileId = UUID.randomUUID();
   }
 
   @Override
@@ -73,12 +76,24 @@ public class FSWAL implements WAL {
         if (writer == null) {
           writer = WALFile.createWriter(conf, Writer.file(new Path(logFile)),
                                         Writer.appendIfExists(true));
-          log.info("Successfully acquired lease for {}", logFile);
+          log.info(
+              "Successfully acquired lease, {}-{}, FSWAL UUID {}, file {}",
+              conf.getName(),
+              conf.getTaskId(),
+              logFileId,
+              logFile
+          );
         }
         break;
       } catch (RemoteException e) {
         if (e.getClassName().equals(WALConstants.LEASE_EXCEPTION_CLASS_NAME)) {
-          log.info("Cannot acquire lease on WAL {}", logFile);
+          log.info(
+              "Cannot acquire lease on WAL, {}-{}, FSWAL UUID {}, file {}",
+              conf.getName(),
+              conf.getTaskId(),
+              logFileId,
+              logFile
+          );
           try {
             Thread.sleep(sleepIntervalMs);
           } catch (InterruptedException ie) {
@@ -89,7 +104,16 @@ public class FSWAL implements WAL {
           throw new ConnectException(e);
         }
       } catch (IOException e) {
-        throw new DataException("Error creating writer for log file " + logFile, e);
+        throw new DataException(
+            String.format(
+                "Error creating writer for log file, %s-%s, FSWAL UUID %s, file %s",
+                conf.getName(),
+                conf.getTaskId(),
+                logFileId,
+                logFile
+            ),
+            e
+        );
       }
     }
     if (sleepIntervalMs >= WALConstants.MAX_SLEEP_INTERVAL_MS) {
@@ -151,7 +175,13 @@ public class FSWAL implements WAL {
 
   @Override
   public void close() throws ConnectException {
-    log.debug("Closing WAL");
+    log.info(
+        "Closing WAL, {}-{}, FSWAL UUID {}, file: {}",
+        conf.getName(),
+        conf.getTaskId(),
+        logFileId,
+        logFile
+    );
     try {
       if (writer != null) {
         writer.close();
