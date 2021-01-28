@@ -171,7 +171,7 @@ public class DataWriter {
         UserGroupInformation.setConfiguration(conf);
         // replace the _HOST specified in the principal config to the actual host
         String principal = SecurityUtil.getServerPrincipal(principalConfig, hostname);
-        UserGroupInformation.loginUserFromKeytab(principal, keytab);
+        //UserGroupInformation.loginUserFromKeytab(principal, keytab);
         final UserGroupInformation ugi = UserGroupInformation.getLoginUser();
         log.info("Login as: " + ugi.getUserName());
 
