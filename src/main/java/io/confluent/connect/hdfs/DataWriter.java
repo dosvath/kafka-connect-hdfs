@@ -185,10 +185,13 @@ public class DataWriter {
           public void run() {
             synchronized (DataWriter.this) {
               while (isRunning) {
+                log.info("Starting ticket renewal thread...");
                 try {
                   DataWriter.this.wait(renewPeriod);
                   if (isRunning) {
-                    ugi.reloginFromKeytab();
+                    log.info("Ticket renew period reached {}, relogin from keytab.",
+                        config.kerberosTicketRenewPeriodMs());
+                    ugi.forceReloginFromKeytab();
                   }
                 } catch (IOException e) {
                   // We ignore this exception during relogin as each successful relogin gives
