@@ -110,6 +110,7 @@ public class DataWriter {
       AvroData avroData,
       Time time
   ) {
+    log.debug("Context assignment size {}", context.assignment().size());
     this.time = time;
     try {
       System.setProperty("hadoop.home.dir", config.hadoopHome());
@@ -164,9 +165,12 @@ public class DataWriter {
           public void run() {
             synchronized (DataWriter.this) {
               while (isRunning) {
+                log.debug("Starting ticket renewal thread...");
                 try {
                   DataWriter.this.wait(config.kerberosTicketRenewPeriodMs());
                   if (isRunning) {
+                    log.debug("Ticket renew period reached {}, relogin from keytab.",
+                        config.kerberosTicketRenewPeriodMs());
                     ugi.reloginFromKeytab();
                   }
                 } catch (IOException e) {
@@ -307,7 +311,10 @@ public class DataWriter {
       }
 
       topicPartitionWriters = new HashMap<>();
+      log.debug("Initializing TopicPartitionWriters from context assignment, size {}",
+          context.assignment().size());
       for (TopicPartition tp : context.assignment()) {
+        log.debug("TopicPartition {}", tp);
         TopicPartitionWriter topicPartitionWriter = new TopicPartitionWriter(
             tp,
             storage,
@@ -376,6 +383,7 @@ public class DataWriter {
 
   public void syncWithHive() throws ConnectException {
     Set<String> topics = new HashSet<>();
+    log.debug("TopicPartitionWriters size {}", topicPartitionWriters.size());
     for (TopicPartition tp : topicPartitionWriters.keySet()) {
       topics.add(tp.topic());
     }
@@ -396,6 +404,7 @@ public class DataWriter {
               connectorConfig,
               path
           );
+          log.debug("Creating hive table");
           hive.createTable(hiveDatabase, topic, latestSchema, partitioner);
           List<String> partitions = hiveMetaStore.listPartitions(hiveDatabase, topic, (short) -1);
           FileStatus[] statuses = FileUtils.getDirectories(storage, new Path(topicDir));
@@ -414,7 +423,10 @@ public class DataWriter {
   }
 
   public void open(Collection<TopicPartition> partitions) {
+    log.debug("Initializing TopicPartitionWriters from open() assignment, size {}",
+        partitions.size());
     for (TopicPartition tp : partitions) {
+      log.debug("Topic Partition: {}", tp);
       TopicPartitionWriter topicPartitionWriter = new TopicPartitionWriter(
           tp,
           storage,

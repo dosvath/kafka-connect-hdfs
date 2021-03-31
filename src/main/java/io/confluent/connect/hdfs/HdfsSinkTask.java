@@ -180,6 +180,7 @@ public class HdfsSinkTask extends SinkTask {
   }
 
   private void recover(Set<TopicPartition> assignment) {
+    log.debug("Recover assignment size {}", assignment.size());
     for (TopicPartition tp : assignment) {
       hdfsWriter.recover(tp);
     }
