@@ -74,6 +74,7 @@ public class DataWriter {
   private HdfsStorage storage;
   private String topicsDir;
   private Format format;
+  private Set<TopicPartition> assignment;
   private RecordWriterProvider writerProvider;
   private io.confluent.connect.storage.format.RecordWriterProvider<HdfsSinkConnectorConfig>
       newWriterProvider;
@@ -276,6 +277,9 @@ public class DataWriter {
         };
       }
 
+      assignment = new HashSet<>(context.assignment());
+      log.debug("DataWriter() assignment {}", assignment.size());
+
       partitioner = newPartitioner(connectorConfig);
 
       hiveIntegration = connectorConfig.getBoolean(HiveConfig.HIVE_INTEGRATION_CONFIG);
@@ -310,7 +314,8 @@ public class DataWriter {
       }
 
       topicPartitionWriters = new HashMap<>();
-      for (TopicPartition tp : context.assignment()) {
+      log.debug("DataWriter() TPW loop assignment {}", assignment.size());
+      for (TopicPartition tp : assignment) {
         TopicPartitionWriter topicPartitionWriter = new TopicPartitionWriter(
             tp,
             storage,
@@ -368,6 +373,7 @@ public class DataWriter {
       }
     }
 
+    log.debug("Write() TPW size {}", topicPartitionWriters.size());
     for (TopicPartition tp : topicPartitionWriters.keySet()) {
       topicPartitionWriters.get(tp).write();
     }
@@ -379,6 +385,7 @@ public class DataWriter {
 
   public void syncWithHive() throws ConnectException {
     Set<String> topics = new HashSet<>();
+    log.debug("syncwithHive() TPW size {}", topicPartitionWriters.size());
     for (TopicPartition tp : topicPartitionWriters.keySet()) {
       topics.add(tp.topic());
     }
@@ -417,7 +424,9 @@ public class DataWriter {
   }
 
   public void open(Collection<TopicPartition> partitions) {
-    for (TopicPartition tp : partitions) {
+    assignment = new HashSet<>(partitions);
+    log.debug("Open() assignment {}", assignment.size());
+    for (TopicPartition tp : assignment) {
       TopicPartitionWriter topicPartitionWriter = new TopicPartitionWriter(
           tp,
           storage,
@@ -461,6 +470,7 @@ public class DataWriter {
       }
     }
     topicPartitionWriters.clear();
+    assignment.clear();
   }
 
   public void stop() {
