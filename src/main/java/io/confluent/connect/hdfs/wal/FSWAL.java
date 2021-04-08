@@ -15,6 +15,7 @@
 
 package io.confluent.connect.hdfs.wal;
 
+import java.nio.file.Paths;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.ipc.RemoteException;
 import org.apache.kafka.common.TopicPartition;
@@ -117,37 +118,20 @@ public class FSWAL implements WAL {
 
   @Override
   public void apply() throws ConnectException {
+    log.debug("Starting to apply WAL");
+    if (!storage.exists(logFile)) {
+      log.debug("WAL file does not exist");
+      return;
+    }
+    acquireLease();
+    log.debug("Lease acquired");
+
     try {
-      if (!storage.exists(logFile)) {
-        log.debug("Storage does not exist");
-        return;
-      }
-      acquireLease();
-      log.debug("Lease acquired");
       if (reader == null) {
         reader = new WALFile.Reader(conf.getHadoopConfiguration(), Reader.file(new Path(logFile)));
       }
-      Map<WALEntry, WALEntry> entries = new HashMap<>();
-      WALEntry key = new WALEntry();
-      WALEntry value = new WALEntry();
-      while (reader.next(key, value)) {
-        String keyName = key.getName();
-        if (keyName.equals(beginMarker)) {
-          entries.clear();
-        } else if (keyName.equals(endMarker)) {
-          for (Map.Entry<WALEntry, WALEntry> entry: entries.entrySet()) {
-            String tempFile = entry.getKey().getName();
-            String committedFile = entry.getValue().getName();
-            if (!storage.exists(committedFile)) {
-              storage.commit(tempFile, committedFile);
-            }
-          }
-        } else {
-          WALEntry mapKey = new WALEntry(key.getName());
-          WALEntry mapValue = new WALEntry(value.getName());
-          entries.put(mapKey, mapValue);
-        }
-      }
+      long latestOffset = commitWALEntriesToStorage();
+      log.info("LATEST WAL OFFSET: {}", latestOffset);
     } catch (CorruptWalFileException e) {
       log.error("Error applying WAL file '{}' because it is corrupted: {}", logFile, e);
       log.warn("Truncating and skipping corrupt WAL file '{}'.", logFile);
@@ -157,13 +141,93 @@ public class FSWAL implements WAL {
       close();
       throw new DataException(e);
     }
+  }
+
+  /**
+   * Read all the filepath entries in the WAL file, commit the pending ones to HdfsStorage,
+   * and return the offsets of the latest entry.
+   *
+   * @return the latest offsets commited to the filesystem based on the WAL file
+   * @throws IOException when the WAL reader is unable to get the next entry
+   */
+  private long commitWALEntriesToStorage() throws IOException {
+    Map<WALEntry, WALEntry> entries = new HashMap<>();
+    WALEntry key = new WALEntry();
+    WALEntry value = new WALEntry();
+
+    // The entry with the latest offsets is the one after the BEGIN marker
+    // in the last BEGIN-END block of the file.
+    // the committed filepath entry with the latest offsets
+    String latestEntry = null;
+    // whether the WAL entry was a BEGIN marker
+    boolean wasBeginMarker = false;
+
+    while (reader.next(key, value)) {
+      log.debug("\ncurrent k name: {}\n current v name: {}", key.getName(), value.getName());
+      String keyName = key.getName();
+
+      if (keyName.equals(beginMarker)) {
+        log.debug("key is BEGIN marker: {}", beginMarker);
+        entries.clear();
+        wasBeginMarker = true;
+      } else if (keyName.equals(endMarker)) {
+        log.debug("key is END marker: {}", endMarker);
+        commitEntriesToStorage(entries);
+      } else {
+        log.debug("key neither BEGIN nor END marker");
+        WALEntry mapKey = new WALEntry(key.getName());
+        WALEntry mapValue = new WALEntry(value.getName());
+        log.debug("adding (K,V) to entries hashmap: \n K: {}\n V: {})",
+            key.getName(), value.getName());
+        entries.put(mapKey, mapValue);
+        if (wasBeginMarker) {
+          latestEntry = value.getName();
+          wasBeginMarker = false;
+        }
+      }
+    }
+
     log.debug("Finished applying WAL");
+    return extractOffsetsFromFilePath(latestEntry);
+  }
+
+  /**
+   * Commit the given WAL file entries to HDFS storage,
+   * typically a batch between BEGIN and END markers in the WAL file.
+   *
+   * @param entries a map of filepath entries containing temp and committed paths
+   */
+  private void commitEntriesToStorage(Map<WALEntry, WALEntry> entries) {
+    for (Map.Entry<WALEntry, WALEntry> entry: entries.entrySet()) {
+      String tempFile = entry.getKey().getName();
+      String committedFile = entry.getValue().getName();
+      if (!storage.exists(committedFile)) {
+        storage.commit(tempFile, committedFile);
+      }
+    }
+  }
+
+  /**
+   * Extract the file offset from the full file path.
+   *
+   * @param fullPath the full HDFS file path
+   * @return the offset or -1 if not present
+   */
+  private long extractOffsetsFromFilePath(String fullPath) {
+    if (fullPath != null) {
+      String latestFileName = Paths.get(fullPath).getFileName().toString();
+      return FileUtils.extractOffset(latestFileName);
+    }
+    return -1;
   }
 
   @Override
   public void truncate() throws ConnectException {
     try {
       String oldLogFile = logFile + ".1";
+      if (storage.exists(oldLogFile)) {
+        log.info("found old log file: {}", oldLogFile);
+      }
       storage.delete(oldLogFile);
       storage.commit(logFile, oldLogFile);
     } finally {

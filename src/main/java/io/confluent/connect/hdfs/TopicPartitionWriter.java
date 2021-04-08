@@ -609,8 +609,12 @@ public class TopicPartitionWriter {
     if (fileStatusWithMaxOffset != null) {
       long lastCommittedOffsetToHdfs = FileUtils.extractOffset(
           fileStatusWithMaxOffset.getPath().getName());
+      log.debug("FileUtils Last Committed Offset: {}", lastCommittedOffsetToHdfs);
+      log.debug("LATEST FILEUTILS OFFSET: {}", lastCommittedOffsetToHdfs);
+
       // `offset` represents the next offset to read after the most recent commit
       offset = lastCommittedOffsetToHdfs + 1;
+      log.debug("next offset to read: {}", offset);
     }
   }
 
