@@ -51,7 +51,7 @@ public class MemoryWAL implements WAL {
   }
 
   @Override
-  public void apply() throws ConnectException {
+  public long apply() throws ConnectException {
     if (data.containsKey(logFile)) {
       List<Object> entryList = data.get(logFile);
       for (Object entry : entryList) {
@@ -59,6 +59,7 @@ public class MemoryWAL implements WAL {
         storage.commit(logEntry.key(), logEntry.value());
       }
     }
+    return -1;
   }
 
   @Override

@@ -15,6 +15,7 @@
 
 package io.confluent.connect.hdfs;
 
+import io.confluent.connect.hdfs.wal.FSWAL;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
 import org.apache.kafka.common.TopicPartition;
@@ -679,13 +680,32 @@ public class TopicPartitionWriter {
 
   private void applyWAL() throws ConnectException {
     if (!recovered) {
-      wal.apply();
+      long latestOffsets = wal.apply();
+      if (latestOffsets != -1) {
+        offset = latestOffsets;
+        log.debug("Resetting offset based on WAL for {} to {}", tp, offset);
+        context.offset(tp, offset);
+        recovered = true;
+      }
     }
   }
 
   private void truncateWAL() throws ConnectException {
     if (!recovered) {
+      attemptRecoveryFromOldWAL();
       wal.truncate();
+    }
+  }
+
+  private void attemptRecoveryFromOldWAL() {
+    // The storage global in this class is HdfsStorage, which only returns
+    // a WAL subclass of FSWAL.
+    long latestOffsets = ((FSWAL) wal).recoverOffsetsFromOldLog();
+    if (latestOffsets != -1) {
+      offset = latestOffsets;
+      log.debug("Resetting offset based on old WAL for {} to {}", tp, offset);
+      context.offset(tp, offset);
+      recovered = true;
     }
   }
 
@@ -806,6 +826,7 @@ public class TopicPartitionWriter {
         extension,
         zeroPadOffsetFormat
     );
+    log.trace("Appending to WAL: {}", committedFile);
     wal.append(tempFile, committedFile);
     appended.add(tempFile);
   }

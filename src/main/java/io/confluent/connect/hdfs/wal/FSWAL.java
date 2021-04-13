@@ -15,6 +15,7 @@
 
 package io.confluent.connect.hdfs.wal;
 
+import java.nio.file.Paths;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.ipc.RemoteException;
 import org.apache.kafka.common.TopicPartition;
@@ -36,6 +37,7 @@ import io.confluent.connect.hdfs.wal.WALFile.Writer;
 public class FSWAL implements WAL {
 
   private static final Logger log = LoggerFactory.getLogger(FSWAL.class);
+  private static final String OLD_LOG_EXTENSION = ".1";
 
   private final HdfsSinkConnectorConfig conf;
   private final HdfsStorage storage;
@@ -118,11 +120,11 @@ public class FSWAL implements WAL {
   }
 
   @Override
-  public void apply() throws ConnectException {
+  public long apply() throws ConnectException {
     log.debug("Starting to apply WAL: {}", logFile);
     if (!storage.exists(logFile)) {
       log.debug("WAL file does not exist: {}", logFile);
-      return;
+      return -1;
     }
     acquireLease();
     log.debug("Lease acquired");
@@ -131,17 +133,17 @@ public class FSWAL implements WAL {
       if (reader == null) {
         reader = new WALFile.Reader(conf.getHadoopConfiguration(), Reader.file(new Path(logFile)));
       }
-      commitWalEntriesToStorage();
+      return commitWalEntriesToStorage();
     } catch (CorruptWalFileException e) {
       log.error("Error applying WAL file '{}' because it is corrupted: {}", logFile, e);
       log.warn("Truncating and skipping corrupt WAL file '{}'.", logFile);
       close();
+      return -1;
     } catch (IOException e) {
       log.error("Error applying WAL file: {}, {}", logFile, e);
       close();
-      throw new DataException(e);
+      throw new ConnectException(e);
     }
-    log.debug("Finished applying WAL: {}", logFile);
   }
 
   /**
@@ -149,22 +151,38 @@ public class FSWAL implements WAL {
    *
    * @throws IOException when the WAL reader is unable to get the next entry
    */
-  private void commitWalEntriesToStorage() throws IOException {
+  private long commitWalEntriesToStorage() throws IOException {
     Map<WALEntry, WALEntry> entries = new HashMap<>();
     WALEntry key = new WALEntry();
     WALEntry value = new WALEntry();
+    // The entry with the latest offsets is the one after the BEGIN marker
+    // in the last BEGIN-END block of the file. There may be empty BEGIN and END blocks as well.
+    // the committed filepath entry with the latest offsets
+    String latestEntry = null;
+    // whether the WAL entry was a BEGIN marker
+    boolean wasBeginMarker = false;
+
     while (reader.next(key, value)) {
       String keyName = key.getName();
       if (keyName.equals(beginMarker)) {
         entries.clear();
+        wasBeginMarker = true;
       } else if (keyName.equals(endMarker)) {
         commitEntriesToStorage(entries);
       } else {
         WALEntry mapKey = new WALEntry(key.getName());
         WALEntry mapValue = new WALEntry(value.getName());
         entries.put(mapKey, mapValue);
+        if (wasBeginMarker) {
+          latestEntry = value.getName();
+          wasBeginMarker = false;
+        }
       }
     }
+    log.debug("Finished applying WAL: {}", logFile);
+    long latestOffset = extractOffsetsFromFilePath(latestEntry);
+    log.trace("Latest offset from WAL: {}", latestOffset);
+    return latestOffset;
   }
 
   /**
@@ -183,11 +201,95 @@ public class FSWAL implements WAL {
     }
   }
 
+  /**
+   * Extract the file offset from the full file path.
+   *
+   * @param fullPath the full HDFS file path
+   * @return the offset or -1 if not present
+   */
+  private long extractOffsetsFromFilePath(String fullPath) {
+    try {
+      if (fullPath != null) {
+        String latestFileName = Paths.get(fullPath).getFileName().toString();
+        return FileUtils.extractOffset(latestFileName);
+      }
+    } catch (IllegalArgumentException e) {
+      log.warn("Could not extract offsets from file path: {}", fullPath);
+    }
+    return -1;
+  }
+
+  /**
+   * Recover the latest offsets from the old WAL file. This is needed
+   * when the most recent WAL file has already been truncated and is not existent.
+   * The above may happen when the connector has flushed all records, and is restarted.
+   *
+   * @return the latest offsets from the old WAL file
+   */
+  public long recoverOffsetsFromOldLog() {
+    String oldFilePath = logFile + OLD_LOG_EXTENSION;
+    if (storage.exists(oldFilePath)) {
+      log.trace("Recovering offsets from old WAL file {}", oldFilePath);
+      Reader oldFileReader = null;
+      try {
+        oldFileReader =
+            new WALFile.Reader(conf.getHadoopConfiguration(), Reader.file(new Path(oldFilePath)));
+        long latestOffset = extractOffsetsFromFilePath(getLatestEntry(oldFileReader));
+        log.trace("Latest offset from old WAL: {}", latestOffset);
+        return latestOffset;
+      } catch (IOException e) {
+        log.warn("Error recovering offsets from old WAL file: {}, {}", oldFilePath, e.getMessage());
+      } finally {
+        if (oldFileReader != null) {
+          try {
+            oldFileReader.close();
+            log.trace("Closed old WAL reader.");
+          } catch (IOException e) {
+            log.warn("Error closing old WAL file reader: {}, {}", oldFilePath, e.getMessage());
+          }
+        }
+      }
+    }
+
+    return -1;
+  }
+
+  /**
+   * Get the latest entry from the old WAL file that contains the latest offsets written to HDFS.
+   *
+   * @param oldFileReader the reader for the old WAL log file
+   * @return the latest value entry filepath
+   * @throws IOException if the WAL cannot be read
+   */
+  private String getLatestEntry(Reader oldFileReader) throws IOException {
+    WALEntry key = new WALEntry();
+    WALEntry value = new WALEntry();
+    // The entry with the latest offsets is the one after the BEGIN marker
+    // in the last BEGIN-END block of the file. There may be empty BEGIN and END blocks as well.
+    // the committed filepath entry with the latest offsets
+    String latestEntry = null;
+    // whether the WAL entry was a BEGIN marker
+    boolean wasBeginMarker = false;
+
+    while (oldFileReader.next(key, value)) {
+      String keyName = key.getName();
+      if (keyName.equals(beginMarker)) {
+        wasBeginMarker = true;
+      } else if (!keyName.equals(endMarker)) {
+        if (wasBeginMarker) {
+          latestEntry = value.getName();
+          wasBeginMarker = false;
+        }
+      }
+    }
+    return latestEntry;
+  }
+
   @Override
   public void truncate() throws ConnectException {
     log.debug("Truncating WAL file: {}", logFile);
     try {
-      String oldLogFile = logFile + ".1";
+      String oldLogFile = logFile + OLD_LOG_EXTENSION;
       storage.delete(oldLogFile);
       storage.commit(logFile, oldLogFile);
     } finally {

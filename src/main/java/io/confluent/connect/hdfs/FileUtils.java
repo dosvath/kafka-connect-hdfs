@@ -146,7 +146,7 @@ public class FileUtils {
    * @return the offset of the last record written to the specified file in HDFS
    * @throws IllegalArgumentException if the filename does not match the expected pattern
    */
-  public static long extractOffset(String filename) {
+  public static long extractOffset(String filename) throws IllegalArgumentException {
     Matcher m = HdfsSinkConnectorConstants.COMMITTED_FILENAME_PATTERN.matcher(filename);
     // NB: if statement has side effect of enabling group() call
     if (!m.matches()) {
